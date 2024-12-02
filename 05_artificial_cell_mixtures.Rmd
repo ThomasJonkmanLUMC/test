@@ -1,0 +1,355 @@
+---
+title: "05 - Artificial cell mixtures"
+output: 
+  html_document:
+    code_folding: show
+    toc: true
+    toc_depth: 2
+    toc_float: true
+---
+
+In this script, artificial cell mixtures will be constructed in silico by mixing together the DNAm-profiles of sorted blood cell types (downloaded from GSE167998) in several compositions. We start by making a baseline sample with the same blood cell composition as the average sample from our study, then make new artificial mixtures by adding 1 SD of one cell type while proportionally shrinking all others.
+
+---
+
+# Download data
+
+Download the external dataset from GEO. For the sample sheet, the SuperSeries of GSE167998 will be used, which is GSE181034. However, since this Superseries does not contain complete DNAm-values, these were downloadeed separately from GSE167998 (GSE167998_matrix_processed.txt.gz, found [here](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE167998)).
+
+*NB: This code is not knit for computational time reasons. It has previously been run in RStudio. Its output will be loaded in the next chunk.*
+```{r, eval = F}
+setwd("/exports/molepi/RSC_BIOS/Users/tjonkman/cellcounts")
+.libPaths("/exports/molepi/RSC_BIOS/Users/tjonkman/Packages/4.3.1")
+
+library(GEOquery)
+#load series and platform data from GEO.
+gset <- getGEO("GSE181034", GSEMatrix =TRUE, getGPL=FALSE)
+
+#Extract the sample sheet and the DNAm-matrix from the gset.
+salas.ss <- pData(gset[[1]])
+salas.dnam <- exprs(gset[[1]])
+
+#Save data.
+save(salas.dnam, salas.ss, file = "05_salas data.rda")
+```
+
+# Select sorted blood cells
+
+The external GEO-dataset contains 56 sorted blood cell samples in which DNAm has been measured. It also contains 12 mixed samples. Here, the 56 sorted blood cell samples will be selected. From those, the artificial blood cell compositions will be made.
+```{r}
+setwd("/exports/molepi/RSC_BIOS/Users/tjonkman/cellcounts")
+.libPaths("/exports/molepi/RSC_BIOS/Users/tjonkman/Packages/4.3.1")
+
+load("05_salas data.rda")
+head(salas.ss)
+dim(salas.ss)
+
+#Select only the sorted cell types, and only the informative variables.
+salas.ss <- salas.ss[-(grep(pattern = "Glioma", x = salas.ss$source_name_ch1)),]
+salas.ss <- salas.ss[-(grep(pattern = "mixture", x = salas.ss$source_name_ch1)),]
+salas.ss <- salas.ss[,c(1, 2, 8, 11, 17, 19, 20, 83)]
+
+#Reformat data.
+salas.ss$age <- do.call("rbind", strsplit(x = salas.ss$characteristics_ch1.1, split = "age: "))[,2]
+salas.ss$race <- do.call("rbind", strsplit(x = salas.ss$characteristics_ch1.7, split = "ethnic_self: "))[,2]
+salas.ss$weight <- do.call("rbind", strsplit(x = salas.ss$characteristics_ch1.9, split = "weight_kg: "))[,2]
+salas.ss$height <- do.call("rbind", strsplit(x = salas.ss$characteristics_ch1.10, split = "height_cm: "))[,2]
+salas.ss$basename <- do.call("rbind", strsplit(x = salas.ss$"basename:ch1", split = "/"))[,7]
+
+#Relabel cell types. Use both an abbreviated name and a full name.
+salas.ss <- salas.ss[order(salas.ss$source_name_ch1),]
+salas.ss$ct <- c(rep("Mono", 5),
+           rep("Eos", 4), 
+           rep("Treg", 3), 
+           rep("CD4Tnv", 5), 
+           rep("CD4Tmem", 4), 
+           rep("NK", 4), 
+           rep("CD8Tnv", 5), 
+           rep("CD8Tmem", 4), 
+           rep("Baso", 6), 
+           rep("Neu", 6), 
+           rep("Bnv", 4), 
+           rep("Bmem", 6)
+           )
+
+salas.ss$cell.type <- c(rep("Monocytes", 5),
+                  rep("Eosinophils", 4), 
+                  rep("Regulatory T cells", 3), 
+                  rep("Naive CD4 T cells", 5), 
+                  rep("Memory CD4 T cells", 4), 
+                  rep("Natural Killer cells", 4), 
+                  rep("Naive CD8 T cells", 5), 
+                  rep("Memory CD8 T cells", 4), 
+                  rep("Basophils", 6), 
+                  rep("Neutrophils", 6), 
+                  rep("Naive B cells", 4), 
+                  rep("Memory B cells", 6)
+                  )
+
+salas.ss$ct <- factor(salas.ss$ct, levels = c("Neu", "Eos", "Baso", "Mono", "Bnv", "Bmem", "CD4Tnv", "CD4Tmem", "CD8Tnv", "CD8Tmem", "Treg", "NK"))
+salas.ss$cell.type <- factor(salas.ss$cell.type, levels = c("Neutrophils", "Eosinophils", "Basophils", "Monocytes", "Naive B cells", "Memory B cells", "Naive CD4 T cells", "Memory CD4 T cells", "Naive CD8 T cells", "Memory CD8 T cells", "Regulatory T cells", "Natural Killer cells"))
+
+#Select the new reformatted columns.
+salas.ss <- salas.ss[,c(1, 9, 10, 11, 12, 13, 14)]
+salas.ss$age <- as.numeric(salas.ss$age)
+head(salas.ss)
+dim(salas.ss)
+
+#Select samples in the DNAm-data as well.
+salas.dnam <- salas.dnam[,rownames(salas.ss)]
+salas.dnam[1:5,1:5]
+dim(salas.dnam)
+all(rownames(salas.ss) == colnames(salas.dnam)) #Should be TRUE.
+```
+
+There are NAs in the DNAm-data downloaded from GEO. To solve this issue, data were downloaded in a  
+```{r}
+#The DNAm-data has NAs. Replace these with raw data separately downloaded from GEO.
+salas.dnam <- read.table("/exports/molepi/RSC_BIOS/Users/tjonkman/cellcounts/05_GSE167998_matrix_processed.txt", header = T)
+salas.dnam[1:5,1:5]
+
+#Select only DNAm columns from DNAm-data.
+idx <- grep(".Detection.Pval", colnames(salas.dnam))
+salas.dnam <- salas.dnam[,-idx]
+colnames(salas.dnam) <- do.call("rbind", strsplit(x = colnames(salas.dnam), split = "X"))[,2]
+
+#Select only the 56 sorted cell samples.
+salas.dnam <- salas.dnam[,c(1, match(salas.ss$basename, colnames(salas.dnam)))]
+
+#Replace the NA-riddled DNAm-values from the processed data file with the complete DNAm-values from the raw data file.
+rownames(salas.dnam) <- salas.dnam$ID_REF
+salas.dnam <- salas.dnam[,-1]
+
+table(colnames(salas.dnam) == salas.ss$basename) # Should be 100% TRUE.
+```
+
+--- 
+
+# Make artificial mixtures
+
+Read in previously-made sample sheet and re-calculate the mean and SD of each cell type's proportion in our 4058 blood samples.
+```{r}
+load("01_sample_sheet.rda")
+dim(ss)
+
+library(dplyr)
+distr <- data.frame(
+  row.names = colnames(ss[,11:22]),
+  mean = apply(ss[,11:22], 2, mean),
+  sd = apply(ss[,11:22], 2, sd)
+)
+distr
+```
+
+Define mean age and DNAm per cell type in the external dataset of sorted blood cells.
+```{r}
+ct.age <-
+  salas.ss %>%
+  group_by(ct) %>%
+  summarise(
+    samples = n(),
+    age.mean = mean(age)
+  )
+ct.age
+
+#Calculate mean DNAm per cell type.
+ct.dnam <- matrix(NaN, nrow = nrow(salas.dnam), ncol = length(levels(salas.ss$ct)))
+rownames(ct.dnam) <- rownames(salas.dnam)
+colnames(ct.dnam) <- levels(salas.ss$ct)
+dim(ct.dnam)
+ct.dnam[1:10,1:10]
+
+for(i in 1:length(levels(salas.ss$ct))){
+
+  idx <- which(salas.ss$ct == levels(salas.ss$ct)[i])
+  ct <- salas.dnam[,idx]
+  ct.dnam[,i] <- rowMeans(ct)
+}
+ct.dnam[1:10,1:10]
+
+#Define the mean and SD of each cell type.
+ct.distr <- data.frame(
+ ct = levels(salas.ss$ct),
+ perc = distr$mean
+)
+ct.distr
+sum(ct.distr$perc) #Should be 100.
+```
+
+Make additional artificial samples with 1 SD extra of any given cell type. Shrink the others proportionally to maintain the total of 100%. 
+```{r}
+#Prepare a dataframe to store artificial mixtures.
+ct.distr$xNK <- ct.distr$xTreg <- ct.distr$xCD8Tmem <- ct.distr$xCD8Tnv <- ct.distr$xCD4Tmem <- ct.distr$xCD4Tnv <- ct.distr$xBmem <- ct.distr$xBnv <- ct.distr$xMono <- ct.distr$xBaso <- ct.distr$xEos <- ct.distr$xNeu <- ct.distr$perc
+
+#For each artificial mixture, add 1 SD of a given cell type.
+ct.distr$xNeu[1] <- ct.distr$xNeu[1] + distr$sd[1]
+ct.distr$xEos[2] <- ct.distr$xEos[2] + distr$sd[2]
+ct.distr$xBaso[3] <- ct.distr$xBaso[3] + distr$sd[3]
+ct.distr$xMono[4] <- ct.distr$xMono[4] + distr$sd[4]
+ct.distr$xBnv[5] <- ct.distr$xBnv[5] + distr$sd[5]
+ct.distr$xBmem[6] <- ct.distr$xBmem[6] + distr$sd[6]
+ct.distr$xCD4Tnv[7] <- ct.distr$xCD4Tnv[7] + distr$sd[7]
+ct.distr$xCD4Tmem[8] <- ct.distr$xCD4Tmem[8] + distr$sd[8]
+ct.distr$xCD8Tnv[9] <- ct.distr$xCD8Tnv[9] + distr$sd[9]
+ct.distr$xCD8Tmem[10] <- ct.distr$xCD8Tmem[10] + distr$sd[10]
+ct.distr$xTreg[11] <- ct.distr$xTreg[11] + distr$sd[11]
+ct.distr$xNK[12] <- ct.distr$xNK[12] + distr$sd[12]
+
+#Then shrink all other cell types proportionally to maintain the total of 100%.
+for(i in 1:12){
+
+  ct.distr[-i, i+2] <- ct.distr[-i, i+2] * (100 - ct.distr[i, i+2]) / (sum(ct.distr[-i, i+2]))
+}
+colSums(ct.distr[,-1]) #Should be 100 for all columns!
+```
+
+Use the artificial cell compositions to predict the mean sample age and DNAm-values.
+```{r}
+#Multiply the cell count percentages of the artificial mixtures by the mean age of the samples for that cell type.
+avg.age <- t(as.matrix(ct.distr[,2:14])) %*% ct.age$age.mean / 100
+avg.age
+
+#Now do the same for the mean methylation per CpG in each cell type.
+avg.dnam <- t(as.matrix(ct.distr[,2:14])) %*% t(ct.dnam) / 100
+dim(avg.dnam)
+avg.dnam[1:3,1:10]
+
+#Save artificial mixtures.
+art.age <- avg.age
+art.dnam <- avg.dnam
+art.mix <- list(art.age, art.dnam)
+save(art.mix, file = "05_artificial_mixtures.rda")
+```
+
+---
+
+# Calculate clocks
+
+Use artificial mixtures to calculate clocks.
+
+*NB: due to an error in R Markdown, the calcPCClocks function crashes when knitting the document. It does run normally when running the code normally from within R. As a workaround, this chunk has been run in RStudio, is being skipped in the knitting process (eval = F), and its output will be loaded in the next chunk*
+```{r, eval = F}
+library(EpiDISH)
+library(methylclock)
+library(DunedinPACE)
+
+#Re-order DNAm-data to a dataframe where CpGs are rows and ProbeID is the first column.
+betas <- as.matrix(t(art.dnam))
+head(betas)
+
+#Calculate most clocks using the methylclock package.
+clocks <- as.data.frame(DNAmAge(betas))
+
+#Calculate the PC GrimAge using the code from GitHub (https://github.com/MorganLevineLab/PC-Clocks)
+clocksDir <- "/exports/molepi/RSC_BIOS/Users/tjonkman/cellcounts/PC-clocks/"
+source(paste(clocksDir, "run_calcPCClocks.R", sep = ""))
+source(paste(clocksDir, "run_calcPCClocks_Accel.R", sep = ""))
+
+grimage.info <- data.frame(
+  row.names = rownames(art.age),
+  Age = art.age,
+  Female = 1
+)
+grimage.info
+PCClock_DNAmAge <- calcPCClocks(path_to_PCClocks_directory = clocksDir,
+                                   datMeth = t(betas),
+                                   datPheno = grimage.info)
+skip
+clocks$GrimAge <- PCClock_DNAmAge$PCGrimAge
+
+#Calculate DunedinPACE. First remove SNPs from beta-values (these cause errors).
+betas.dunedin <- betas
+idx <- grep("ch", rownames(betas.dunedin))
+betas.dunedin <- betas.dunedin[-idx,]
+poa <- PACEProjector(betas)
+clocks$DunedinPACE <- poa$DunedinPACE
+clocks
+
+clocks$id[1] <- "Baseline"
+
+#Since this chunk has to be skipped, write its output to disk and load it in in the next chunk.
+save(clocks, file = "05_artificial_mixture_clocks.rda")
+```
+
+---
+
+# Plot clocks
+
+Plot clocks for each artificial cell mixture.
+```{r, fig.width = 16.0, fig.height = 4.8, dpi = 150}
+#Load clocks.
+load("05_artificial_mixture_clocks.rda")
+
+#Initialize sample sheet with a couple of columns from the clocks object.
+plot.data <- data.frame(
+  row.names = clocks$id,
+  id = factor(clocks$id, levels = unique(clocks$id)),
+  age = art.age,
+  Hannum = clocks$Hannum,
+  Horvath = clocks$Horvath,
+  `Skin/Blood` = clocks$skinHorvath,
+  Zhang = clocks$EN,
+  PhenoAge = clocks$Levine,
+  GrimAge = clocks$GrimAge,
+  DunedinPACE = clocks$DunedinPACE * 52.143,
+  check.names = F
+)
+
+#Scale everything to the baseline.
+for(i in 2:9)(
+
+  plot.data[,i] <- plot.data[,i] - plot.data[1, i]
+  
+)
+
+levels(plot.data$id)
+plot.data$id <- factor(plot.data$id, levels = c("Baseline", "xNeu", "xEos", "xBaso", "xMono", "xBnv", "xCD4Tnv", "xCD8Tnv", "xBmem", "xCD4Tmem", "xCD8Tmem", "xTreg", "xNK"))
+plot.data
+
+#Plot clocks per cell type.
+library(reshape2)
+library(ggplot2)
+library(RColorBrewer)
+plot.melt <- melt(plot.data, id.vars = c("id", "age"))
+plot.melt$diff <- plot.melt$value - plot.melt$age
+
+#Add 4 groups: myeloid, lymph naive, lymph memory, and other lymph.
+plot.melt$group <- factor(NA, levels = c("Baseline", "Myeloid", "Lymphoid (naïve)", "Lymphoid (memory)", "Lymphoid (other)"))
+plot.melt$group[plot.melt$id %in% c("Baseline")] <- "Baseline"
+plot.melt$group[plot.melt$id %in% c("xNeu", "xEos", "xBaso", "xMono")] <- "Myeloid"
+plot.melt$group[plot.melt$id %in% c("xBnv", "xCD4Tnv", "xCD8Tnv")] <- "Lymphoid (naïve)"
+plot.melt$group[plot.melt$id %in% c("xBmem", "xCD4Tmem", "xCD8Tmem")] <- "Lymphoid (memory)"
+plot.melt$group[plot.melt$id %in% c("xTreg", "xNK")] <- "Lymphoid (other)"
+head(plot.melt)
+
+plot.theme <- list(geom_point(),
+                   theme_bw(),
+                   geom_line(position = "identity"),
+                   theme(axis.text.x = element_text(angle = 45, hjust = 1))
+                   )
+
+#Create plot.
+plot.filter <- plot.melt[(plot.melt$id != "Baseline" & plot.melt$variable != "Skin/Blood"),]
+levels(plot.filter$id) <- c("Baseline", "Neu", "Eos", "Baso", "Mono", "Bnv", "CD4Tnv", "CD8Tnv", "Bmem", "CD4Tmem", "CD8Tmem", "Treg", "NK")
+plot.filter$id
+
+ggplot(data = plot.filter, aes(x = id, y = diff, fill = variable, group = variable)) + 
+    scale_color_manual(values = c("#E41A1C", "#377EB8", "#4DAF4A", "#984EA3", "#FF7F00", "#37B8B2", "#F781BF")) +
+    scale_fill_manual(values = c("#E41A1C", "#377EB8", "#4DAF4A", "#984EA3", "#FF7F00", "#37B8B2", "#F781BF")) +
+    theme_bw(base_size = 22) +
+    geom_bar(stat = "identity", width = 0.6, position = position_dodge(width = 0.6)) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1),
+          axis.title.y = element_text(size = 20),
+          axis.title.x = element_blank(),
+          legend.text = element_text(size = 14)) +
+    geom_hline(yintercept = 0, color = "#444444", linetype = "dashed") + 
+    labs(title = "Artificial Cell Mixtures", x = "Fraction", y = "AgeAccel upon\nadding 1 SD", fill = "Clock") +
+    facet_grid(cols = vars(group), scales = "free_x", space = "free_x")
+```
+
+---
+
+# SessionInfo
+```{r}
+sessionInfo()
+```

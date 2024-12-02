@@ -1,0 +1,657 @@
+--- 
+title: "02 - Age and cell counts"
+output: 
+  html_document:
+    code_folding: show
+    toc: true
+    toc_depth: 2
+    toc_float: true
+---
+
+In this script, we set up the methods for analyzing the association between cell counts and an outcome of interest. We will use calendar age as an example outcome to see what happens using several methods.
+
+We show the following methods:
+
+* Univariable regression (age ~ cell count)
+* Multivariable regression (age ~ cc1 + cc2 + cc3...)
+* Principal component regression (age ~ PC1 + PC2 + PC3...)
+
+We also make some plots of the distribution of variables in our dataset.
+ 
+# Distributions
+
+Load sample sheet.
+```{r}
+setwd("/exports/molepi/RSC_BIOS/Users/tjonkman/cellcounts")
+.libPaths("/exports/molepi/RSC_BIOS/Users/tjonkman/Packages/4.3.1")
+
+load("01_sample_sheet.rda")
+dim(ss)
+dim(cc)
+
+# Set the variable of interest. In this case: calendar age.
+ss$var <- ss$age
+
+#Print cohort characteristics.
+library(dplyr)
+ss %>% 
+  summarise(
+    samples = n(),
+    age.mean = round(mean(age), 1),
+    age.sd = round(sd(age), 1),
+    age.range = paste0(min(age), "-", max(age)),
+    male.female.perc = paste0(round(mean(sex == "male") * 100), "%/", round(mean(sex == "female") * 100), "%")
+  )
+
+ss %>% 
+  group_by(study) %>% 
+  summarise(
+    samples = n(),
+    age.mean = round(mean(age), 1),
+    age.sd = round(sd(age), 1),
+    age.range = paste0(min(age), "-", max(age)),
+    male.female.perc = paste0(round(mean(sex == "male") * 100), "%/", round(mean(sex == "female") * 100), "%")
+  )
+```
+
+Show age distribution.
+```{r, fig.width = 5, fig.height = 4, dpi = 150}
+library(ggplot2)
+ggplot(ss, aes(x = age)) + 
+  geom_histogram(fill = "#005580", color = "#ffffff", binwidth = 5, breaks = seq(15, 90, 5)) + 
+  theme_bw() + 
+  scale_x_continuous(breaks = seq(15, 90, 5)) + 
+  scale_y_continuous(breaks = seq(0, 600, 100)) + 
+  theme(panel.grid.minor = element_blank()) +
+  labs(x = "Age (years)", y = "Frequency")
+```
+
+Show cell count distribution.
+```{r, fig.width = 6, fig.height = 4, dpi = 150}
+distr <- data.frame(
+  row.names = colnames(ss[,11:22]),
+  mean = round(apply(ss[,11:22], 2, mean), 1),
+  sd = round(apply(ss[,11:22], 2, sd), 1)
+)
+
+#Prepare data for plotting.
+celltypes <- c("Neutrophils", "Eosinophils", "Basophils", "Monocytes", "Naive B cells", "Memory B cells", "Naive CD4 T cells", "Memory CD4 T cells", "Naive CD8 T cells", "Memory CD8 T cells", "Regulatory T cells", "Natural Killer cells")
+rownames(distr) <- celltypes
+distr$Fraction <- factor(rownames(distr), levels = rownames(distr))
+distr$mean.lab <- format(round(distr$mean, 1), 1)
+distr
+
+#Define colors.
+ct.palette <- c("#cc3333", "#a32929", "#7a1f1f", "#e68019", 
+                "#5acc56", "#439940",
+                "#66baff", "#5295cc", "#3d7099", "#294a66", 
+                "#5962b3", "#984ea3"
+                )
+
+#Make pie chart.
+library(shadowtext)
+ggplot(distr, aes(x = "", y = mean, fill = Fraction, label = mean.lab)) +
+  geom_bar(stat = "identity", color = "white") +
+  geom_shadowtext(aes(label = mean.lab, y = mean, x = 1.35), position = position_stack(vjust = 0.5), color = "black", bg.color = "white", size = 4) +
+  coord_polar("y", start = 0) +
+  theme_minimal()+
+  theme(axis.text = element_blank(), axis.title = element_blank(), panel.grid = element_blank()) +
+  scale_fill_manual(values = ct.palette)
+```
+
+Plot correlations of cell types with age.
+```{r, fig.width = 9.6, fig.height = 3.2, dpi = 150}
+plot.data <- ss
+
+library(reshape2)
+plot.melt <- melt(plot.data[,c(1:4, 11:22)], id.vars = c("id", "age", "sex", "study"), variable.name = "Fraction", value.name = "Percentage")
+levels(plot.melt$Fraction) <- celltypes
+# head(plot.melt)
+
+annots <- data.frame(
+  Fraction = celltypes,
+  age.cor = paste0("R: ", as.numeric(round(cor(plot.data$age, plot.data[,11:22]), 2)))
+)
+annots$Fraction <- factor(annots$Fraction, levels = unique(annots$Fraction))
+
+ggplot(plot.melt, aes(x = age, y = Percentage, color = Fraction)) +
+  geom_point(shape = 1) +
+  geom_smooth(method = "lm", color = "#222222") +
+  facet_wrap(facets = vars(Fraction), scales = "free", nrow = 2, labeller = labeller(Fraction = as_labeller(1:12))) +
+  theme_bw() +
+  scale_color_manual(values = ct.palette) +
+  geom_shadowtext(data = annots, aes(x = 18, y = Inf, label = age.cor, color = Fraction), hjust = 0, vjust = 1.5, size = 4, color = "black", bg.color = "white") +
+  guides(color= "none") +
+  labs(x = "Age (years)") +
+  scale_x_continuous(breaks = c(0, 20, 40, 60, 80))
+```
+
+# Example of DNAmAge vs AgeAccel
+
+Show an example of 3 people: young, old and a young person who is considered older by the clock.
+```{r, fig.width = 4, fig.height = 4, dpi = 150}
+#Select 3 subjects for highlighting:
+#A: 50 years old, horvath DNAmAge of 50 (young).
+#B: 60 years old, horvath DNAmAge of 60 (old).
+#C: 50 years old, horvath DNAmAge of 60 ("biologically old").
+
+highlight.subjects <- ss[c(1072, 261, 184), c("age", "horvath")]
+highlight.subjects$horvath <- round(highlight.subjects$horvath)
+# highlight.subjects
+
+#Select 50 random subjects for the example plot, plus the 3 highlighted subjects.
+set.seed(1)
+ss.subset <- ss[(ss$age > 40 & ss$age < 70),]
+ss.subset <- ss[sample(x = rownames(ss.subset), size = 100), c("age", "horvath")]
+ss.subset <- rbind(ss.subset, highlight.subjects)
+# my.limits <- c(min(ss.subset[,c("age", "horvath")]), max(ss.subset[,c("age", "horvath")]))
+my.limits <- c(40, 70)
+
+highlight.subjects$subject.no <- c("A", "B", "C")
+
+#Plot.
+ggplot(ss.subset, aes(x = age, y = horvath)) + 
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+  geom_point(size = 2, color = "#999999", alpha = 1) +
+  lims(x = my.limits, y = my.limits) +
+  labs(x = "Calendar age (years)", y = "DNAmAge (years)") +
+  theme_bw() +
+  geom_segment(x = 50, xend = 60, y = 60, yend = 60, linetype = "dashed", color = "black") +
+  geom_segment(x = 50, xend = 50, y = 50, yend = 60, linetype = "dashed", color = "black") + 
+  geom_point(data = highlight.subjects, mapping = aes(x = age, y = horvath), color = c("#009900", "#004499", "#990000"), size = 4) +
+  geom_point(data = highlight.subjects, mapping = aes(x = age, y = horvath), color = c("#11CC11", "#1166CC", "#CC1111"), size = 2.5) + 
+  geom_shadowtext(data = highlight.subjects, mapping = aes(x = age, y = horvath, label = subject.no), color = c("#11CC11", "#1166CC", "#CC1111"), bg.color = "white", size = 6, hjust = c(1.6, -0.6, 1.6), fontface = "bold")
+```
+
+Run several tests to investigate the age effect of cell types.
+
+3 methods will be used:
+
+* Univariable regression (age ~ cell count)
+* Multivariable regression (age ~ cc1 + cc2 + cc3...)
+* Principal component regression (age ~ PC1 + PC2 + PC3...)
+
+---
+
+# Method 1: Univariable regression
+
+```{r, fig.width = 4, fig.height = 3.6, dpi = 150}
+#Make a placeholder column for storing a single cell type in.
+ss$ct <- NaN
+
+#Make a dataframe to store results.
+res <- data.frame(
+  row.names = colnames(cc),
+  cell.type = celltypes,
+  estimate = NaN,
+  std.error = NaN,
+  t.stat = NaN,
+  p.val = NaN,
+  expl.var = NaN
+)
+# res
+
+for(i in 1:ncol(cc)){
+  
+  #Select 1 cell type.
+  ct <- colnames(cc)[i]
+  ss$ct <- ss[,ct]
+  
+  #Test association with var.
+  fit <- lm(age ~ ct, data = ss)
+  
+  #Store results
+  s <- summary(fit)
+  res[i, 2:5] <- s$coefficients["ct",]
+  
+  #Which percentage of the variance of the clock is explained by this cell type?
+  res$expl.var[i] <- s$r.squared
+}
+
+res[,2] <- round(res[,2], 2)
+res[,3] <- round(res[,3], 2)
+res[,4] <- round(res[,4], 1)
+res[,6] <- round(res[,6], 3)
+
+#Calculate 95% confidence intervals.
+res$ci.lower <- res$estimate - (1.96 * res$std.error)
+res$ci.upper <- res$estimate + (1.96 * res$std.error)
+
+res$cell.type <- factor(res$cell.type, levels = res$cell.type)
+
+res.1ct <- res
+res.1ct
+
+#Make the plot.
+plot.theme <- list(
+  geom_hline(yintercept = 0, linetype = "dashed"), 
+  geom_point(color = "#005580", shape = 19, size = 1.5), 
+  geom_errorbar(aes(ymin = ci.lower, ymax = ci.upper), width = 0.4, color = "#005580"), 
+  labs(x = NULL, y = "Age effect (years per %pt.)"), 
+  theme_bw(),
+  guides(color = "none"), 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+)
+
+ggplot(res.1ct, aes(x = cell.type, y = estimate)) + 
+  plot.theme
+```
+
+To illustrate that the cell types are strongly correlated with each other, make a correlation heatmap.
+```{r, fig.width = 4, fig.height = 3.6, dpi = 150}
+cor.cc <- cor(as.matrix(cc))
+rownames(cor.cc) <- celltypes
+colnames(cor.cc) <- celltypes
+
+#Convert the correlation matrix to a long format for plotting.
+cor.cc <- melt(cor.cc, value.name = "Correlation")
+
+#Create the heatmap.
+ggplot(cor.cc, aes(x = Var1, y = Var2, fill = Correlation)) +
+  geom_tile() +
+  geom_text(aes(label = format(round(Correlation, 1), 1)), vjust = 0.5, hjust = 0.5, size = 2.5) +
+  scale_fill_gradient2(low = "blue", mid = "white", high = "red",
+                       midpoint = 0, limit = c(-1, 1)) +
+  labs(x = NULL, y = NULL) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  guides(fill = "none")
+```
+
+To demonstrate that these correlations lead to ambiguous effect sizes, show what happens when you correct the age effect of neutrophils for different cell types.
+```{r, fig.width = 4, fig.height = 3.6, dpi = 150}
+#Make a placeholder column for storing a single cell type in.
+ss$ct <- NaN
+
+#Make a dataframe to store results.
+res <- data.frame(
+  row.names = c("none", colnames(cc[,-1])),
+  cell.type = c("none", celltypes[2:12]),
+  estimate = NaN,
+  std.error = NaN,
+  t.stat = NaN,
+  p.val = NaN
+)
+# res
+
+#Fill in the unadjusted neutrophil age effect.
+res[1,2:5] <- res.1ct["Neu", 2:5]
+
+#Fill in the neutrophil age effects, each time adjusted for another cell type.
+for(i in 1:ncol(cc[,-1])){
+  
+  #Select 1 cell type.
+  ct <- colnames(cc[,-1])[i]
+  ss$ct <- ss[,ct]
+  
+  #Test association with var.
+  fit <- lm(age ~ Neu + ct, data = ss)
+  
+  #Store results
+  s <- summary(fit)
+  res[i+1, 2:5] <- s$coefficients["Neu",]
+}
+
+res[,2] <- round(res[,2], 2)
+res[,3] <- round(res[,3], 2)
+res[,4] <- round(res[,4], 1)
+
+#Calculate 95% confidence intervals.
+res$ci.lower <- res$estimate - (1.96 * res$std.error)
+res$ci.upper <- res$estimate + (1.96 * res$std.error)
+
+res$cell.type <- factor(res$cell.type, levels = res$cell.type)
+
+res.neu.corr <- res
+res.neu.corr
+
+#Add the models.
+res.neu.corr$model <- c("Neu", "Neu + Eos", "Neu + Baso", "Neu + Mono", "Neu + Bnv", "Neu + Bmem", "Neu + CD4Tnv", "Neu + CD4Tmem", "Neu + CD8Tnv", "Neu + CD8Tmem", "Neu + Treg", "Neu + NK")
+res.neu.corr$model <- factor(res.neu.corr$model, levels = unique(res.neu.corr$model))
+
+#Make the plot.
+ggplot(res.neu.corr, aes(x = model, y = estimate)) +
+  geom_hline(yintercept = res.neu.corr["none", "estimate"], linetype = "dashed", color = "#333333", alpha = 1, linewidth = 0.5) + 
+  geom_point(color = "#005580", shape = 19, size = 1.5) + 
+  geom_errorbar(aes(ymin = ci.lower, ymax = ci.upper), width = 0.4, color = "#005580") + 
+  labs(y = "Neutrophil age effect (years per %pt.)") + 
+  theme_bw() + 
+  guides(color = "none") + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), axis.title.x = element_blank())
+```
+
+---
+
+# Method 2: Multivariable regression
+
+```{r, fig.width = 12, fig.height = 10, dpi = 150}
+#Empty dataframe for storing the model intercepts.
+ints <- data.frame(
+  row.names = paste0("No ", celltypes),
+  ct.left.out = paste0("No ", celltypes),
+  intercept = rep(NaN, 12)
+)
+
+corr.12ct <- function(form, ct.left.out){
+  
+  #Test association with age.
+  fit <- lm(form, data = ss)
+  
+  #Add a dummy entry for the cell type that was set to NA.
+  na.ct <- data.frame(
+    row.names = names(fit$coefficients[13]),
+    estimate = NaN,
+    std.error = NaN,
+    t.stat = NaN,
+    p.val = NaN,
+    ci.lower = NaN,
+    ci.upper = NaN
+    )
+  
+  #Store results.
+  s <- summary(fit)
+  res <- as.data.frame(s$coefficients)
+  
+  colnames(res) <- c("estimate", "std.error", "t.stat", "p.val")
+
+  #Calculate 95% confidence intervals.
+  res$ci.lower <- res$estimate - (1.96 * res$std.error)
+  res$ci.upper <- res$estimate + (1.96 * res$std.error)
+  
+  res[,1] <- round(res[,1], 2)
+  res[,2] <- round(res[,2], 2)
+  res[,3] <- round(res[,3], 1)
+  # res[,4] <- format(res[,4], scientific = T, digits = 2)
+  res[,5] <- round(res[,5], 2)
+  res[,6] <- round(res[,6], 2)
+  
+  #Add the intercept to the dataframe.
+  ints[ct.left.out, 2] <<- round(res[1,1], 1)
+  
+  # #Remove the intercept effect, selecting only cell type effects.
+  # print(res[1,])
+  res <- res[-(1),]
+  
+  #Add the cell type that was set to NA in this model.
+  res <- rbind(res, na.ct)
+  
+  #Re-order columns.
+  res <- res[c("Neu", "Eos", "Baso", "Mono", "Bnv", "Bmem", "CD4Tnv", "CD4Tmem", "CD8Tnv", "CD8Tmem", "Treg", "NK"),]
+  rownames(res) <- celltypes
+  
+  res$ct <- factor(rownames(res), levels = rownames(res))
+  res$ct.left.out <- ct.left.out
+  
+  return(res)
+}
+
+res.no.neu     <- corr.12ct(formula(age ~ Baso + Eos + NK + Treg + CD8Tmem + CD8Tnv + CD4Tmem + CD4Tnv + Bmem + Bnv + Mono + Neu), "No Neutrophils")
+res.no.eos     <- corr.12ct(formula(age ~ Baso + NK + Treg + CD8Tmem + CD8Tnv + CD4Tmem + CD4Tnv + Bmem + Bnv + Mono + Neu + Eos), "No Eosinophils")
+res.no.baso    <- corr.12ct(formula(age ~ NK + Treg + CD8Tmem + CD8Tnv + CD4Tmem + CD4Tnv + Bmem + Bnv + Mono + Neu + Eos + Baso), "No Basophils")
+res.no.mono    <- corr.12ct(formula(age ~ Baso + Eos + Neu + NK + Treg + CD8Tmem + CD8Tnv + CD4Tmem + CD4Tnv + Bmem + Bnv + Mono), "No Monocytes")
+res.no.bnv     <- corr.12ct(formula(age ~ Baso + Eos + Neu + Mono + NK + Treg + CD8Tmem + CD8Tnv + CD4Tmem + CD4Tnv + Bmem + Bnv), "No Naive B cells")
+res.no.bmem    <- corr.12ct(formula(age ~ Baso + Eos + Neu + Mono + Bnv + NK + Treg + CD8Tmem + CD8Tnv + CD4Tmem + CD4Tnv + Bmem), "No Memory B cells")
+res.no.cd4tnv  <- corr.12ct(formula(age ~ Baso + Eos + Neu + Mono + Bnv + Bmem + NK + Treg + CD8Tmem + CD8Tnv + CD4Tmem + CD4Tnv), "No Naive CD4 T cells")
+res.no.cd4tmem <- corr.12ct(formula(age ~ Baso + Eos + Neu + Mono + Bnv + Bmem + CD4Tnv + NK + Treg + CD8Tmem + CD8Tnv + CD4Tmem), "No Memory CD4 T cells")
+res.no.cd8tnv  <- corr.12ct(formula(age ~ Baso + Eos + Neu + Mono + Bnv + Bmem + CD4Tnv + CD4Tmem + NK + Treg + CD8Tmem + CD8Tnv), "No Naive CD8 T cells")
+res.no.cd8tmem <- corr.12ct(formula(age ~ Baso + Eos + Neu + Mono + Bnv + Bmem + CD4Tnv + CD4Tmem + CD8Tnv + NK + Treg + CD8Tmem), "No Memory CD8 T cells")
+res.no.treg    <- corr.12ct(formula(age ~ Baso + Eos + Neu + Mono + Bnv + Bmem + CD4Tnv + CD4Tmem + CD8Tnv + CD8Tmem + NK + Treg), "No Regulatory T cells")
+res.no.nk      <- corr.12ct(formula(age ~ Baso + Eos + Neu + Mono + Bnv + Bmem + CD4Tnv + CD4Tmem + CD8Tnv + CD8Tmem + Treg + NK), "No Natural Killer cells")
+
+#Plot the effect sizes of each cell type for each model. This is supposed to illustrate that these fluctuate wildly based on which cell type you leave out.
+res.12ct <- rbind(res.no.neu, res.no.eos, res.no.baso, res.no.mono, res.no.bnv, res.no.bmem, res.no.cd4tnv, res.no.cd4tmem, res.no.cd8tnv, res.no.cd8tmem, res.no.treg, res.no.nk)
+res.12ct$ct.left.out <- factor(res.12ct$ct.left.out, levels = unique(res.12ct$ct.left.out))
+head(res.12ct)
+
+#Test the proportion of variance explained by this method, compared to an intercept-only model.
+#NOTE: this only has to be done once. The total effect of each 11-celltype model is exactly the same.
+fit <- lm(formula = age ~ Neu + Eos + Baso + Mono + Bnv + Bmem + CD4Tnv + CD4Tmem + CD8Tnv + CD8Tmem + Treg + NK, data = ss)
+summary(fit)
+var.ex <- paste0("R²: ", round(summary(fit)$r.squared * 100, 1), "%")
+var.ex
+
+ints$intercept <- paste0("Intercept: ", ints$intercept)
+ints$ct.left.out <- factor(ints$ct.left.out, levels = ints$ct.left.out)
+
+#Plot the effect sizes for each of the 12 models, each time leaving out a different cell type.
+#Print the intercepts at the top left, and the variance explained at the top right.
+ggplot(res.12ct, aes(x = ct, y = estimate)) +
+  plot.theme +
+  geom_vline(data = subset(res.12ct, is.na(estimate)), aes(xintercept = ct), color = "red", alpha = 0.5, linetype = "dashed") +
+  facet_wrap(facets = vars(ct.left.out), scales = "free") +
+  geom_text(data = ints, aes(x = 0.6, y = 8.3, label = intercept), hjust = 0, vjust = 0.6) +
+  annotate("text", x = 12.4, y = 8.3, label = var.ex, hjust = 1, vjust = 0.6) +
+  scale_y_continuous(limits = c(-7.5, 8.4), breaks = seq(-10, 10, 2))
+```
+
+Print separated versions of the results without naive CD8 T cells or without basophils, as examples.
+```{r, fig.width = 4, fig.height = 3.6, dpi = 150}
+ex.mod = "No Naive CD8 T cells"
+res.ex <- res.12ct[res.12ct$ct.left.out == ex.mod,]
+ggplot(res.ex, aes(x = ct, y = estimate)) +
+  plot.theme +
+  geom_vline(data = subset(res.ex, is.na(estimate)), aes(xintercept = ct), color = "red", alpha = 0.5, linetype = "dashed") +
+  geom_text(data = ints[rownames(ints) == ex.mod,], aes(x = 0.6, y = 8.3, label = intercept), hjust = 0, vjust = 0.6) +
+  annotate("text", x = 12.4, y = 8.3, label = var.ex, hjust = 1, vjust = 0.6) +
+  scale_y_continuous(limits = c(-7.5, 8.4), breaks = seq(-10, 10, 2))
+
+ex.mod = "No Basophils"
+res.ex <- res.12ct[res.12ct$ct.left.out == ex.mod,]
+ggplot(res.ex, aes(x = ct, y = estimate)) +
+  plot.theme +
+  geom_vline(data = subset(res.ex, is.na(estimate)), aes(xintercept = ct), color = "red", alpha = 0.5, linetype = "dashed") +
+  geom_text(data = ints[rownames(ints) == ex.mod,], aes(x = 0.6, y = 8.3, label = intercept), hjust = 0, vjust = 0.6) +
+  annotate("text", x = 12.4, y = 8.3, label = var.ex, hjust = 1, vjust = 0.6) +
+  scale_y_continuous(limits = c(-7.5, 8.4), breaks = seq(-10, 10, 2))
+```
+
+---
+
+# Method 3: Principal component regression
+
+First, calculate PCs.
+```{r, fig.height = 4, fig.width = 5, dpi = 150}
+#Calculate PCs in the cell counts.
+set.seed(1)
+pca <- prcomp(cc, scale = TRUE)
+
+#Scree plot.
+var.ex <- pca$sdev^2 / sum(pca$sdev^2)
+scree.dat <- data.frame(PC = 1:length(var.ex), variance = var.ex, round.var = format(round(var.ex, 2)))
+scree.dat <- scree.dat[1:11,]
+ggplot(scree.dat, aes(x = PC, y = variance, label = round.var)) +
+  geom_point(size = 2, color = "#005580") +
+  geom_line(linewidth = 1, color = "#005580") +
+  geom_text(hjust = -0.1, vjust = -0.4, size = 3.5) +
+  labs(x = "Principal Component", y = "Proportion of variance explained") +
+  scale_x_continuous(limits  = c(0.5, 11.5), breaks = 1:11) +
+  theme_bw() +
+  theme(panel.grid.minor = element_blank())
+
+#Biplot.
+biplot(pca, cex = 1, choices = c(1,2))
+
+# Create a data frame with the principal component scores.
+pca.df <- as.data.frame(pca$x[,1:12])
+
+# Scatter plot of PC1 vs. PC2 with variance explained labeled.
+ggplot(pca.df, aes(x = PC1, y = PC2)) +
+  geom_point(shape = 1) +
+  labs(x = paste0("PC1: ", round(var.ex[1]*100, 1), "%"), y = paste0("PC2: ", round(var.ex[2]*100, 1), "%")) +
+  ggtitle("") +
+  theme_bw()
+```
+
+Reverse PC sign if necessary to make the interpretation more intuitive.
+```{r}
+#Correlations between PCs and cell counts.
+corr.pcs <- cor(pca.df, cc)
+colnames(corr.pcs) <- celltypes
+
+#If the correlation of this fraction is below 0, inverse the sign of the PC so that it becomes positive.
+for(i in 1:12){
+  
+  j <- which(corr.pcs[i,]^2 == max(corr.pcs[i,]^2))
+  
+  if(corr.pcs[i,j] == min(corr.pcs[i,])){
+    
+    pca.df[,i] <- -(pca.df[,i])
+    pca$rotation[,i] <- -(pca$rotation[,i])
+    corr.pcs[i,] <- -(corr.pcs[i,])
+    
+  }
+}
+
+#Check if the most explanatory cell type is always positive. Should be 100% TRUE.
+for(i in 1:12){
+  
+  j <- which(corr.pcs[i,]^2 == max(corr.pcs[i,]^2))
+  print(paste0(rownames(corr.pcs)[i], ": ", corr.pcs[i,j] == max(corr.pcs[i,])))
+
+}
+
+save(pca.df, file = "02_pca_df.rda")
+```
+
+Check how the PCs are correlated with individual cell counts.
+```{r, fig.width = 4, fig.height = 3.2, dpi = 150}
+plot.data <- cbind(pca.df, cc)
+
+#Scatter plot of principal components with all 12 cell types.
+plot.data <- melt(plot.data, id.vars = c("PC1", "PC2", "PC3", "PC4", "PC5", "PC6", "PC7", "PC8", "PC9", "PC10", "PC11", "PC12"), variable.name = "cell.type", value.name = "proportion")
+
+round(cor(pca.df, cc), 1)
+
+library(ggpubr)
+plot.theme <- list(
+  geom_point(shape = 1),
+  geom_smooth(method = "lm"),
+  stat_cor(method = "pearson", cor.coef.name = "R", label.x = -Inf, label.y = 105, hjust = 0, vjust = 0.7, size = 3.5, r.digits = 1, label.sep = ",  "),
+  facet_wrap(facets = vars(cell.type)),
+  theme_bw(),
+  theme(strip.text = element_text(size = 10)),
+  scale_y_continuous(limits = c(-10, 105), breaks = seq(-25, 100, 25))
+)
+
+#Correlations between PCs and cell counts.
+corr.pcs <- corr.pcs[1:11,]
+
+corr.pcs <- melt(corr.pcs, varnames = c("PC", "cell.type"), value.name = "Correlation")
+corr.pcs$cell.type <- factor(corr.pcs$cell.type, levels = rev(levels(corr.pcs$cell.type)))
+
+ggplot(corr.pcs, aes(x = PC, y = cell.type, fill = Correlation)) +
+  geom_tile() +
+  geom_text(aes(label = format(round(Correlation, 1), digits = 1)), vjust = 0.5, hjust = 0.5, size = 2.5) +
+  scale_fill_gradient2(low = "blue", mid = "white", high = "red",
+                       midpoint = 0, limit = c(-1, 1)) +
+  labs(x = NULL, y = NULL) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  guides(fill = "none")
+```
+
+Include the PCs into the model, and plot the results.
+```{r, fig.width = 4.4, fig.height = 4.3, dpi = 150}
+ss.pc <- cbind(ss, pca.df)
+
+fit <- lm(formula = age ~ PC1 + PC2 + PC3 + PC4 + PC5 + PC6 + PC7 + PC8 + PC9 + PC10 + PC11, data = ss.pc)
+summary(fit)
+var.ex <- paste0("R²: ", round(summary(fit)$r.squared * 100, 1), "%")
+
+res <- as.data.frame(summary(fit)$coefficients)
+colnames(res) <- c("estimate", "std.error", "t.stat", "p.val")
+
+#Calculate 95% confidence intervals.
+res$ci.lower <- res$estimate - (1.96 * res$std.error)
+res$ci.upper <- res$estimate + (1.96 * res$std.error)
+
+res[,1] <- round(res[,1], 2)
+res[,2] <- round(res[,2], 2)
+res[,3] <- round(res[,3], 1)
+res[,5] <- round(res[,5], 2)
+res[,6] <- round(res[,6], 2)
+
+# #Remove the intercept and the age effect, selecting only cell type effects.
+pc.int <- res[1,1]
+res <- res[-(1),]
+
+res$PC <- factor(rownames(res), levels = rownames(res))
+
+res.pcs <- res
+res.pcs
+
+plot.theme <-   list(
+  geom_hline(yintercept = 0, linetype = "dashed"), 
+  geom_point(color = "#005580", shape = 19, size = 1.5), 
+  geom_errorbar(aes(ymin = ci.lower, ymax = ci.upper), color = "#005580", width = 0.4), 
+  geom_vline(data = subset(res.pcs, is.na(estimate)), aes(xintercept = PC), color = "red", alpha = 0.5, linetype = "dashed"), 
+  labs(x = NULL, y = "Age effect"), 
+  theme_bw(), 
+  guides(color = "none"),
+  scale_y_continuous(limits = c(-8.5, 5.0), breaks = seq(-10, 10, 2)),
+  theme(plot.margin = margin(t = 5.5, r = 5.5, b = 5.5, l = 22, unit = "pt")),
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  )
+
+#Manually add the apparent biological meaning to each PC.
+pc.labs <- c("PC1: Neutrophils", "PC2: T cell naive/memory", "PC3: Treg/CD4Tmem", "PC4: Bmem/Mono", "PC5: Bnv/Eos", "PC6: Naive CD8 T cells", "PC7: Mixed (CD4Tnv/CD8Tnv)", "PC8: Eos/Mono", "PC9: Mixed (CD4Tnv+CD8Tmem)", "PC10: Mixed (Bmem)", "PC11: Mixed (Baso)")
+res.pcs$PC.label <- pc.labs
+res.pcs$PC.label <- factor(res.pcs$PC.label, levels = unique(res.pcs$PC.label))
+
+#Intercept and variance explained.
+ggplot(res.pcs, aes(x = PC.label, y = estimate)) +
+  plot.theme +
+  annotate("text", x = 0.6, y = 5.0, label = paste0("Intercept: ", pc.int), hjust = 0, vjust = 0.6) +
+  annotate("text", x = 11.4, y = 5.0, label = var.ex, hjust = 1, vjust = 0.6)
+```
+
+Leave out PC2 to demonstrate that this doesn't affect effect sizes for the remaining PCs (in contrast to the analysis using individual cell counts).
+```{r, fig.width = 4.4, fig.height = 4.3, dpi = 150}
+fit <- lm(formula = age ~ PC1 + PC3 + PC4 + PC5 + PC6 + PC7 + PC8 + PC9 + PC10 + PC11, data = ss.pc)
+summary(fit)
+test.var.ex <- paste0("R²: ", round(summary(fit)$r.squared * 100, 1), "%")
+
+res <- as.data.frame(summary(fit)$coefficients)
+colnames(res) <- c("estimate", "std.error", "t.stat", "p.val")
+
+#Calculate 95% confidence intervals.
+res$ci.lower <- res$estimate - (1.96 * res$std.error)
+res$ci.upper <- res$estimate + (1.96 * res$std.error)
+
+res[,1] <- round(res[,1], 2)
+res[,2] <- round(res[,2], 2)
+res[,3] <- round(res[,3], 1)
+res[,5] <- round(res[,5], 2)
+res[,6] <- round(res[,6], 2)
+
+# #Remove the intercept and the age effect, selecting only cell type effects.
+test.pc.int <- res[1,1]
+res <- res[-(1),]
+
+#Add a dummy PC2.
+res <- rbind(res[1,], c(NaN, NaN, NaN, NaN, NaN, NaN), res[-1,])
+rownames(res)[2] <- "PC2"
+
+res$PC <- factor(rownames(res), levels = rownames(res))
+
+res.test <- res
+res.test
+
+#Manually add the apparent biological meaning to each PC.
+res.test$PC.label <- pc.labs
+res.test$PC.label <- factor(res.test$PC.label, levels = unique(res.test$PC.label))
+
+#Intercept and variance explained.
+ggplot(res.test, aes(x = PC.label, y = estimate)) +
+  plot.theme +
+  annotate("text", x = 0.6, y = 5.0, label = paste0("Intercept: ", pc.int), hjust = 0, vjust = 0.6) +
+  annotate("text", x = 11.4, y = 5.0, label = test.var.ex, hjust = 1, vjust = 0.6) +
+  geom_vline(data = subset(res.test, is.na(estimate)), aes(xintercept = PC.label), color = "red", alpha = 0.5, linetype = "dashed")
+```
+
+---
+
+# SessionInfo
+```{r}
+sessionInfo()
+```

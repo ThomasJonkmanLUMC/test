@@ -1,0 +1,391 @@
+--- 
+title: "01 - Calculate EpiDISH and clocks"
+output: 
+  html_document:
+    code_folding: show
+    toc: true
+    toc_depth: 2
+    toc_float: true
+---
+
+# Load data
+
+```{r}
+setwd("/exports/molepi/RSC_BIOS/Users/tjonkman/cellcounts")
+.libPaths("/exports/molepi/RSC_BIOS/Users/tjonkman/Packages/4.3.1")
+
+library(SummarizedExperiment)
+load("/exports/archive/molepi-lts/processing/RSC_BIOS/RP3_data/IlluminaHumanMethylation450k/450k/methData_Betas_BIOS_Freeze2_unrelated.RData")
+
+#Remove samples with NAs in age, sex, or study.
+betas <- betas[,!is.na(betas$sampling_age)]
+betas <- betas[,!is.na(betas$sex)]
+betas <- betas[,!is.na(betas$biobank_id)]
+class(betas)
+dim(betas)
+```
+
+---
+
+# Correct for batch effects
+
+*NB: this code will not be run inside R Markdown because it takes a very large amount of time and resources to run. Instead, it has been run inside RStudio, and its output will be loaded in in the next chunk.*
+```{r, eval = F}
+#Check for batch effects in the DNAm-data before ComBat.
+gc()
+set.seed(1)
+pca <- prcomp(t(assay(betas)), scale = TRUE)
+gc()
+
+pca.df <- as.data.frame(pca$x)
+var.ex <- pca$sdev^2 / sum(pca$sdev^2)
+library(ggplot2)
+ggplot(pca.df, aes(x = PC1, y = PC2)) +
+  geom_point(aes(color = betas$biobank_id)) +
+  scale_color_manual(values = c("#E41A1C", "#377EB8", "#4DAF4A", "#984EA3", "#FF7F00", "#37B8B2", "#F781BF")) +
+  labs(x = paste0("PC1: ", round(var.ex[1]*100, 1), "%"), y = paste0("PC2: ", round(var.ex[2]*100, 1), "%")) +
+  ggtitle("") +
+  theme_bw()
+
+#Peform ComBat adjustment for batch effects.
+library(sva)
+mm = model.matrix(~sampling_age, data = colData(betas))
+gc()
+betas.combat <- ComBat(
+  dat = assay(betas),
+  batch = factor(betas$biobank_id),
+  mod = mm,
+  par.prior=T,
+  )
+betas.combat[betas.combat < 0] <- 0
+betas.combat[betas.combat > 1] <- 1
+length(which(betas.combat < 0))
+length(which(betas.combat > 1))
+gc()
+
+#Check for batch effects in the DNAm-data after ComBat.
+gc()
+set.seed(1)
+pca <- prcomp(t(betas.combat), scale = FALSE)
+gc()
+
+pca.df <- as.data.frame(pca$x)
+var.ex <- pca$sdev^2 / sum(pca$sdev^2)
+ggplot(pca.df, aes(x = PC1, y = PC2)) +
+  geom_point(shape = 1, aes(color = betas$biobank_id)) +
+  scale_color_manual(values = c("#E41A1C", "#377EB8", "#4DAF4A", "#984EA3", "#FF7F00", "#37B8B2", "#F781BF")) +
+  labs(x = paste0("PC1: ", round(var.ex[1]*100, 1), "%"), y = paste0("PC2: ", round(var.ex[2]*100, 1), "%")) +
+  ggtitle("") +
+  theme_bw()
+
+#Save the ComBat-corrected DNAm-values.
+save(betas.combat, file = "01_betas_after_combat.rda")
+```
+
+---
+
+# Predict cell counts
+
+Predict cells counts using EpiDISH.
+```{r}
+load("01_betas_after_ComBat.rda")
+assay(betas) <- betas.combat
+rm(betas.combat)
+gc()
+
+library(EpiDISH)
+ed <- epidish(beta.m = assay(betas), ref.m = cent12CT450k.m, method = "RPC")
+cc <- ed$estF
+
+cc <- cc[,c("Neu", "Eos", "Baso", "Mono", "Bnv", "Bmem", "CD4Tnv", "CD4Tmem", "CD8Tnv", "CD8Tmem", "Treg", "NK")]
+cc <- cc*100
+class(cc)
+dim(cc)
+
+save(cc, file = "01_epiDISH.rda")
+```
+
+Cell counts were also calculated before batch correction using ComBat. Check the difference between the two.
+```{r, fig.width = 24, fig.height = 6}
+load("test/cc_before_combat.rda")
+cc_before_combat <- cc_before_combat[rownames(cc),]
+class(cc_before_combat)
+dim(cc_before_combat)
+
+#Prepare plot data.
+plot.data <- as.data.frame(colData(betas)[, c("uuid", "sampling_age", "biobank_id")])
+
+plot.data <- cbind(plot.data, cc_before_combat)
+colnames(plot.data)[4:15] <- paste0(colnames(plot.data)[4:15], "-before ComBat")
+
+plot.data <- cbind(plot.data, cc)
+colnames(plot.data)[16:27] <- paste0(colnames(plot.data)[16:27], "-after ComBat")
+
+library(reshape2)
+plot.data <- melt(plot.data, id.vars = c("uuid", "sampling_age", "biobank_id"))
+colnames(plot.data) <- c("id", "age", "study", "variable", "percentage")
+
+x <- do.call("rbind", strsplit(x = as.character(plot.data$variable), split = "-"))
+plot.data$cell.type <- factor(x[,1], levels = colnames(cc))
+plot.data$combat <- factor(x[,2], levels = c("before ComBat", "after ComBat"))
+
+#Violin plots of the distribution of each cell type per cohort.
+library(ggplot2)
+ggplot(plot.data, aes(x = study, y = percentage, fill = study)) + 
+  geom_violin(color = "#444444") + 
+  facet_grid(rows = vars(combat), cols = vars(cell.type), scales = "free", switch = "y") +
+  scale_fill_manual(values = c("#E41A1C", "#377EB8", "#4DAF4A", "#984EA3", "#FF7F00", "#37B8B2", "#F781BF")) +
+  theme_bw() +
+  theme(
+    legend.position = "bottom",
+    axis.text.x = element_text(angle = 45, hjust = 1)
+    ) + 
+  labs(x = "Study", y = "Percentage", title = "Cell counts before and after ComBat")
+```
+
+---
+
+# Calculate clocks
+
+Split betas into 9 chunks (clocks calculation crashes if too many samples are included).
+```{r}
+#Split the data into 5 chunks.
+betas.1 <- betas[, 1:500]
+betas.2 <- betas[, 501:1000]
+betas.3 <- betas[, 1001:1500]
+betas.4 <- betas[, 1501:2000]
+betas.5 <- betas[, 2001:2500]
+betas.6 <- betas[, 2501:3000]
+betas.7 <- betas[, 3001:3500]
+betas.8 <- betas[, 3501:4000]
+betas.9 <- betas[, 4001:4121]
+
+save(betas.1, file = "test/betas.1.rda")
+save(betas.2, file = "test/betas.2.rda")
+save(betas.3, file = "test/betas.3.rda")
+save(betas.4, file = "test/betas.4.rda")
+save(betas.5, file = "test/betas.5.rda")
+save(betas.6, file = "test/betas.6.rda")
+save(betas.7, file = "test/betas.7.rda")
+save(betas.8, file = "test/betas.8.rda")
+save(betas.9, file = "test/betas.9.rda")
+
+ss <- as.data.frame(colData(betas))
+
+ss$sex <- as.factor(ss$sex)
+ss$biobank_id <- as.factor(ss$biobank_id)
+
+#Add some columns to accomodate the PC-GrimAge clock.
+ss$Age <- ss$sampling_age
+ss$Female <- as.character(ss$sex)
+ss$Female[ss$Female == "male"] <- 0
+ss$Female[ss$Female == "female"] <- 1
+ss$Female <- as.numeric(ss$Female)
+class(ss)
+dim(ss)
+
+save(ss, file = "01_clock_sample_sheet.rda")
+
+rm(betas, betas.1, betas.2, betas.3, betas.4, betas.5, betas.6, betas.7, betas.8, betas.9)
+gc()
+```
+
+Calculate clocks for each chunk.
+
+*NB: due to an error in R Markdown, the calcPCClocks function crashes when knitting the document. It does run normally when running the code normally from within R. As a workaround, this chunk has been run in RStudio, is being skipped in the knitting process (eval = F), and its output will be loaded in the next chunk*
+```{r, eval = F}
+library(methylclock)
+library(DunedinPACE)
+
+#Set the directory for calculating the PC-GrimAge clock, and load the functions.
+clocksDir <- "/exports/molepi/RSC_BIOS/Users/tjonkman/cellcounts/PC-clocks/"
+source(paste(clocksDir, "run_calcPCClocks.R", sep = ""))
+source(paste(clocksDir, "run_calcPCClocks_Accel.R", sep = ""))
+
+#Define function to calculate the clocks of interest.
+CalculateClocks <- function(betas){
+  
+  #Calculate most clocks using the methylclock package.
+  clocks <- as.data.frame(DNAmAge(assay(betas)))
+  
+  #Calculate the PC GrimAge using the code from GitHub (https://github.com/MorganLevineLab/PC-Clocks)
+  ss.subset <- ss[colnames(betas),]
+  PCClock_DNAmAge <- calcPCClocks(path_to_PCClocks_directory = clocksDir,
+                                     datMeth = t(assay(betas)),
+                                     datPheno = ss.subset)
+  clocks$GrimAge <- PCClock_DNAmAge$PCGrimAge
+  
+  
+  #Calculate DunedinPACE.
+  poa <- PACEProjector(assay(betas))
+  clocks$DunedinPACE <- poa$DunedinPACE
+  
+  return(clocks)
+}
+
+#Calculate clocks for each chunk.
+load("test/betas.1.rda")
+clocks.1 <- CalculateClocks(betas.1)
+skip
+rm(betas.1)
+
+load("test/betas.2.rda")
+clocks.2 <- CalculateClocks(betas.2)
+skip
+rm(betas.2)
+
+load("test/betas.3.rda")
+clocks.3 <- CalculateClocks(betas.3)
+skip
+rm(betas.3)
+
+load("test/betas.4.rda")
+clocks.4 <- CalculateClocks(betas.4)
+skip
+rm(betas.4)
+
+load("test/betas.5.rda")
+clocks.5 <- CalculateClocks(betas.5)
+skip
+rm(betas.5)
+
+load("test/betas.6.rda")
+clocks.6 <- CalculateClocks(betas.6)
+skip
+rm(betas.6)
+
+load("test/betas.7.rda")
+clocks.7 <- CalculateClocks(betas.7)
+skip
+rm(betas.7)
+
+load("test/betas.8.rda")
+clocks.8 <- CalculateClocks(betas.8)
+skip
+rm(betas.8)
+
+load("test/betas.9.rda")
+clocks.9 <- CalculateClocks(betas.9)
+skip
+rm(betas.9)
+
+#Bind the chunks together.
+clocks <- rbind(clocks.1, clocks.2, clocks.3, clocks.4, clocks.5, clocks.6, clocks.7, clocks.8, clocks.9)
+class(clocks)
+dim(clocks)
+colnames(clocks)
+
+save(clocks, file = "01_clocks.rda")
+```
+
+Just like the cell counts, the clocks were also calculated before ComBat. Compare the results.
+```{r, fig.width = 12, fig.height = 6}
+load("01_clocks.rda")
+load("test/clocks_before_combat.rda")
+load("01_clock_sample_sheet.rda")
+clocks_before_combat <- clocks_before_combat[rownames(clocks),]
+class(clocks_before_combat)
+dim(clocks_before_combat)
+colnames(clocks_before_combat)
+
+#Prepare plot data.
+plot.data <- as.data.frame(ss[, c("uuid", "sampling_age", "biobank_id")])
+
+plot.data <- cbind(plot.data, clocks_before_combat[,c(3, 2, 11, 4, 12, 13)])
+colnames(plot.data)[4:9] <- c("Hannum", "Horvath", "Zhang", "PhenoAge", "GrimAge", "DunedinPACE")
+colnames(plot.data)[4:9] <- paste0(colnames(plot.data)[4:9], "-before ComBat")
+
+plot.data <- cbind(plot.data, clocks[,c(3, 2, 11, 4, 12, 13)])
+colnames(plot.data)[10:15] <- c("Hannum", "Horvath", "Zhang", "PhenoAge", "GrimAge", "DunedinPACE")
+colnames(plot.data)[10:15] <- paste0(colnames(plot.data)[10:15], "-after ComBat")
+
+#Transform DunedinPACE into weeks instead of years.
+plot.data[,grep(pattern = "DunedinPACE", x = colnames(plot.data))] <- (plot.data[,grep(pattern = "DunedinPACE", x = colnames(plot.data))] * 52.143)
+plot.data <- melt(plot.data, id.vars = c("uuid", "sampling_age", "biobank_id"))
+colnames(plot.data) <- c("id", "age", "study", "variable", "DNAmAge")
+
+x <- do.call("rbind", strsplit(x = as.character(plot.data$variable), split = "-"))
+plot.data$cell.type <- factor(x[,1], levels = c("Hannum", "Horvath", "Zhang", "PhenoAge", "GrimAge", "DunedinPACE"))
+plot.data$combat <- factor(x[,2], levels = c("before ComBat", "after ComBat"))
+
+#Violin plots of the distribution of each cell type per cohort.
+ggplot(plot.data, aes(x = study, y = DNAmAge, fill = study)) + 
+  geom_violin(color = "#444444") + 
+  facet_grid(rows = vars(combat), cols = vars(cell.type), scales = "free") +
+  scale_fill_manual(values = c("#E41A1C", "#377EB8", "#4DAF4A", "#984EA3", "#FF7F00", "#37B8B2", "#F781BF")) +
+  theme_bw() +
+  theme(
+    legend.position = "bottom",
+    axis.text.x = element_text(angle = 45, hjust = 1)
+    ) + 
+  labs(x = "Study", y = "Percentage", title = "Clocks before and after ComBat")
+```
+
+Combine all the information in a single sample sheet.
+```{r}
+#Check if the clocks match the cell counts and the sample sheet.
+rownames(clocks) <- clocks$id
+table(rownames(clocks) == rownames(cc)) #Should be 100% TRUE.
+table(rownames(clocks) == rownames(ss)) #Should be 100% TRUE.
+
+#Add age to the clock data.
+clocks$age <- ss$sampling_age
+clocks$sex <- ss$sex
+clocks$study <- ss$biobank_id
+
+#Initialize finalized sample sheet with a couple of columns from the clocks object.
+ss <- data.frame(
+  row.names = clocks$id,
+  id = clocks$id,
+  age = clocks$age,
+  sex = clocks$sex,
+  study = clocks$study,
+  hannum = clocks$Hannum,
+  horvath = clocks$Horvath,
+  zhang = clocks$EN,
+  phenoage = clocks$Levine,
+  grimage = clocks$GrimAge,
+  dunedinpace = clocks$DunedinPACE
+)
+
+#Add the cell counts.
+ss <- cbind(ss, cc)
+
+#Remove entries with NAs.
+library(dplyr)
+idx <- apply(ss, 1, anyNA)
+ss[idx,]
+ss <- ss[!idx,]
+
+#Remove outliers for each cell type (5 SDs outside of the mean).
+for(i in 11:22){
+  ss <- ss[!(
+  (ss[,i] > (mean(ss[,i]) + 5*sd(ss[,i]))) | 
+  (ss[,i] < (mean(ss[,i]) - 5*sd(ss[,i])))
+    ),]
+}
+
+#Save a separate object containing only the cell counts.
+cc <- ss[,11:22]
+
+# Calculate clock residuals.
+ss$hannumRes <- lm(formula = hannum ~ age, data = ss)$residuals
+ss$horvathRes <- lm(formula = horvath ~ age, data = ss)$residuals
+ss$zhangRes <- lm(formula = zhang ~ age, data = ss)$residuals
+ss$phenoageRes <- lm(formula = phenoage ~ age, data = ss)$residuals
+ss$grimageRes <- lm(formula = grimage ~ age, data = ss)$residuals
+
+#Express dunedinPACE in weeks rather than years to make it easier to plot next to other clocks.
+ss$dunedinpace <- ss$dunedinpace * 52.143
+
+class(ss)
+dim(ss)
+colnames(ss)
+
+save(ss, cc, file = "01_sample_sheet.rda")
+```
+
+# SessionInfo
+```{r}
+sessionInfo()
+```

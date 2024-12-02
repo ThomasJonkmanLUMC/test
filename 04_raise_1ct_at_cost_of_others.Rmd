@@ -1,0 +1,246 @@
+---
+title: "04 - Raising 1 CT at the cost of all others (proportionally)"
+output: 
+  html_document:
+    code_folding: show
+    toc: true
+    toc_depth: 2
+    toc_float: true
+---
+
+In this script, we will show an alternative approach to Script 03, where we solve the collinearity issue using a PCA-approach. Instead, here we solve it by modeling the effect of raising one cell type by 1 SD while proportionally shrinking all others to maintain the total of 100%. This method ignores any actual biological correlations that may exist between fractions, but gives more directly interpretable effect sizes.
+
+--- 
+
+# Setup
+
+```{r}
+setwd("/exports/molepi/RSC_BIOS/Users/tjonkman/cellcounts")
+.libPaths("/exports/molepi/RSC_BIOS/Users/tjonkman/Packages/4.3.1")
+
+load("01_sample_sheet.rda")
+dim(ss)
+
+distr <- data.frame(
+  row.names = colnames(ss[,11:22]),
+  mean = round(apply(ss[,11:22], 2, mean), 2),
+  sd = round(apply(ss[,11:22], 2, sd), 2)
+)
+distr
+```
+
+---
+
+# Base analysis
+
+First, we will raise one cell type while shrinking all others. Afterwards, we will repeat the analysis while keeping CD8Tnv constant.
+```{r}
+#Prepare results dataframes.
+res.es <- as.data.frame(matrix(rep(0, 72), nrow = 12))
+dimnames(res.es) <- list(colnames(ss)[11:22], colnames(ss)[c(23:27, 10)])
+res.es
+res.2.5 <- res.es
+res.97.5 <- res.es
+
+#Define function to loop over clocks and cell fractions, testing how the increase of 1 SD in 1 fraction with a proportional decrease in the others affects clock prediction.
+ClockCTReg <- function(clock, ct){
+  
+  ss$clock <- ss[,clock]
+  
+  #Fit a model of how cell counts affect the clock.
+  fit <- lm(clock ~ -1 + Neu + Eos + Baso + Mono + Bnv + Bmem + CD4Tnv + CD4Tmem + CD8Tnv + CD8Tmem + Treg + NK, 
+         data=ss)
+  summary(fit)
+  
+  #Create a new dataframe with an average cell type composition.
+  newdata <- data.frame(t(distr$mean))
+  names(newdata) <- rownames(distr)
+  mean(ss$age)
+  
+  # Predict clock-value at average cell type composition.
+  predict(fit, newdata = newdata) 
+  
+  #Create a new dataframe where one celltype is raised by 1 SD while the rest are shrunk proportionally to maintain the total of 100%.
+  newdata[2,] <- newdata[1,]
+  newdata[2,ct] <- newdata[2,ct] + distr$sd[ct]
+  newdata[2,-ct] <- (100-newdata[2,ct]) * newdata[2,-ct] / sum(newdata[2,-ct])
+  
+  #Predict the clock-value again.
+  pred <- predict(fit,newdata=newdata)
+  
+  #Calculate the difference caused by the shift in cell composition.
+  pred[2]-pred[1]
+  delta <- as.numeric(newdata[2,] - newdata[1,])
+  effect <- sum(delta * coef(fit))
+  effect
+
+  #Calculate the sampling variance of the cell type effect.
+  v <- t(delta) %*% vcov(fit) %*% delta
+  conf.int <- c(
+    effect - 1.96*sqrt(v),
+    effect + 1.96*sqrt(v)
+    )
+  
+  #Store results.
+  res <- c(effect, conf.int)
+  
+  res.es[ct, clock] <<- res[1]
+  res.2.5[ct, clock] <<- res[2]
+  res.97.5[ct, clock] <<- res[3]
+}
+
+for(i in 1:12){
+  
+  for(j in colnames(ss)[c(23:27, 10)]){
+    
+    ClockCTReg(clock = j, ct = i)
+  }
+}
+res.es
+res.2.5
+res.97.5
+```
+
+Plot effects of cell types for each clock.
+```{r, fig.width = 16.0, fig.height = 4.8, dpi = 150}
+res.es$id <- factor(rownames(res.es), levels = rownames(res.es))
+library(reshape2)
+plot.melt <- melt(res.es, id.vars = c("id"))
+
+#relabel clocks to be easier to read.
+levels(plot.melt$variable) <- c("Hannum", "Horvath", "Zhang", "PhenoAge", "GrimAge", "DunedinPACE")
+
+#Add cell category labels to divide the plot into 4 categories; myeloid, lymphoid naive, lymphoid memory, and other lymphoid cells.
+plot.melt$group <- factor(NA, levels = c("Myeloid", "Lymphoid (naïve)", "Lymphoid (memory)", "Lymphoid (other)"))
+plot.melt$group[plot.melt$id %in% c("Neu", "Eos", "Baso", "Mono")] <- "Myeloid"
+plot.melt$group[plot.melt$id %in% c("Bnv", "CD4Tnv", "CD8Tnv")] <- "Lymphoid (naïve)"
+plot.melt$group[plot.melt$id %in% c("Bmem", "CD4Tmem", "CD8Tmem")] <- "Lymphoid (memory)"
+plot.melt$group[plot.melt$id %in% c("Treg", "NK")] <- "Lymphoid (other)"
+
+#Make the plot.
+library(ggplot2)
+ggplot(data = plot.melt, aes(x = id, y = value, fill = variable, group = variable)) + 
+    scale_color_manual(values = c("#E41A1C", "#377EB8", "#4DAF4A", "#984EA3", "#FF7F00", "#37B8B2", "#F781BF")) +
+    scale_fill_manual(values = c("#E41A1C", "#377EB8", "#4DAF4A", "#984EA3", "#FF7F00", "#37B8B2", "#F781BF")) +
+    theme_bw(base_size = 22) +
+    geom_bar(stat = "identity", width = 0.6, position = position_dodge(width = 0.6)) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1),
+          axis.title.y = element_text(size = 20),
+          axis.title.x = element_blank(),
+          legend.text = element_text(size = 14)) +
+    geom_hline(yintercept = 0, color = "#444444", linetype = "dashed") + 
+    labs(title = "Our dataset", x = "Fraction", y = "AgeAccel upon\nadding 1 SD", fill = "Clock") +
+    facet_grid(cols = vars(group), scales = "free_x", space = "free_x")
+```
+
+---
+
+# Keeping CD8Tnv constant
+
+Now repeat the analysis while keeping CD8Tnv constant.
+```{r}
+#Prepare results dataframes.
+res.es <- as.data.frame(matrix(rep(0, 72), nrow = 12))
+dimnames(res.es) <- list(colnames(ss)[11:22], colnames(ss)[c(23:27, 10)])
+res.2.5 <- res.es
+res.97.5 <- res.es
+
+#Define function to loop over clocks and cell fractions, testing how the increase of 1 SD in 1 fraction with a proportional decrease in the others affects clock prediction.
+#NB: this function is the same as before, except it excludes CD8Tnv from the proportional scaling.
+ClockCTReg <- function(clock, ct){
+  
+  ss$clock <- ss[,clock]
+  
+  #Fit a model of how cell counts affect the clock.
+  fit <- lm(clock ~ -1 + Neu + Eos + Baso + Mono + Bnv + Bmem + CD4Tnv + CD4Tmem + CD8Tnv + CD8Tmem + Treg + NK, 
+         data=ss)
+  summary(fit)
+  
+  #Create a new dataframe with an average cell type composition.
+  newdata <- data.frame(t(distr$mean))
+  names(newdata) <- rownames(distr)
+  mean(ss$age)
+  
+  # Predict clock-value at average cell type composition.
+  predict(fit, newdata = newdata)
+  
+  #Create a new dataframe where one celltype is raised by 1 SD while the rest are shrunk proportionally to maintain the total of 100%.
+  newdata[2,] <- newdata[1,]
+  newdata[2,ct] <- newdata[2,ct] + distr$sd[ct]
+  if(ct != 9){
+    newdata[2,-c(ct, 9)] <- (100-newdata[2,ct]-newdata[2,9]) * newdata[2,-c(ct, 9)] / sum(newdata[2,-c(ct, 9)])
+  } else{
+    newdata[2,-ct] <- (100-newdata[2,ct]) * newdata[2,-ct] / sum(newdata[2,-ct])
+  }
+  
+  #Predict the clock-value again.
+  pred <- predict(fit,newdata=newdata) 
+  
+  #Calculate the difference caused by the shift in cell composition.
+  pred[2]-pred[1]
+
+  delta <- as.numeric(newdata[2,] - newdata[1,]) 
+  effect <- sum(delta * coef(fit))
+  effect
+
+  #Calculate the sampling variance of the cell type effect.
+  v <- t(delta) %*% vcov(fit) %*% delta
+  conf.int <- c(
+    effect - 1.96*sqrt(v),
+    effect + 1.96*sqrt(v)
+    )
+  
+  #Store results.
+  res <- c(effect, conf.int)
+  
+  res.es[ct, clock] <<- res[1]
+  res.2.5[ct, clock] <<- res[2]
+  res.97.5[ct, clock] <<- res[3]
+}
+
+for(i in 1:12){
+  
+  for(j in colnames(ss)[c(23:27, 10)]){
+    
+    ClockCTReg(clock = j, ct = i)
+  }
+}
+res.es
+res.2.5
+res.97.5
+```
+
+Plot effects of cell types for each clock.
+```{r, fig.width = 16.0, fig.height = 4.8, dpi = 150}
+res.es$id <- factor(rownames(res.es), levels = rownames(res.es))
+plot.melt <- melt(res.es, id.vars = c("id"))
+
+levels(plot.melt$variable) <- c("Hannum", "Horvath", "Zhang", "PhenoAge", "GrimAge", "DunedinPACE")
+
+plot.melt$group <- factor(NA, levels = c("Myeloid", "Lymphoid (naïve)", "Lymphoid (memory)", "Lymphoid (other)"))
+plot.melt$group[plot.melt$id %in% c("Neu", "Eos", "Baso", "Mono")] <- "Myeloid"
+plot.melt$group[plot.melt$id %in% c("Bnv", "CD4Tnv", "CD8Tnv")] <- "Lymphoid (naïve)"
+plot.melt$group[plot.melt$id %in% c("Bmem", "CD4Tmem", "CD8Tmem")] <- "Lymphoid (memory)"
+plot.melt$group[plot.melt$id %in% c("Treg", "NK")] <- "Lymphoid (other)"
+
+#Make the plot.
+ggplot(data = plot.melt, aes(x = id, y = value, fill = variable, group = variable)) + 
+    scale_color_manual(values = c("#E41A1C", "#377EB8", "#4DAF4A", "#984EA3", "#FF7F00", "#37B8B2", "#F781BF")) +
+    scale_fill_manual(values = c("#E41A1C", "#377EB8", "#4DAF4A", "#984EA3", "#FF7F00", "#37B8B2", "#F781BF")) +
+    theme_bw(base_size = 22) +
+    geom_bar(stat = "identity", width = 0.6, position = position_dodge(width = 0.6)) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1),
+          axis.title.y = element_text(size = 20),
+          axis.title.x = element_blank(),
+          legend.text = element_text(size = 14)) +
+    geom_hline(yintercept = 0, color = "#444444", linetype = "dashed") + 
+    labs(title = "CD8Tnv constant", x = "Fraction", y = "AgeAccel upon\nadding 1 SD", fill = "Clock") +
+    facet_grid(cols = vars(group), scales = "free_x", space = "free_x")
+```
+
+---
+
+# SessionInfo
+```{r}
+sessionInfo()
+```

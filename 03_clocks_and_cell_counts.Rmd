@@ -1,0 +1,389 @@
+--- 
+title: "03 - Clocks and cell counts"
+output: 
+  html_document:
+    code_folding: show
+    toc: true
+    toc_depth: 2
+    toc_float: true
+---
+
+In this script, a trimmed-down version (excluding any plots that are the same as in Script 02, such as the loadings of the cell count PCs) of Script 02 will be run for several clocks. In other words, we will test how cell counts associate with several epigenetic clocks, both DNAmAge (the clock's age estimation) and AgeAccel (the deviation of DNAmAge from calendar age). Since we see that the PC-approach works best, we will only apply this method for the clocks.
+
+---
+
+# Setup
+
+Load sample sheet.
+```{r}
+setwd("/exports/molepi/RSC_BIOS/Users/tjonkman/cellcounts")
+.libPaths("/exports/molepi/RSC_BIOS/Users/tjonkman/Packages/4.3.1")
+
+load("01_sample_sheet.rda")
+dim(ss)
+
+#Load PCA data.
+load("02_pca_df.rda")
+ss.pc <- cbind(ss, pca.df)
+
+library(ggplot2)
+library(reshape2)
+
+#Print the correlations between the investigated clocks (residuals for all except dunedinPACE).
+round(cor(ss[,c(5:10)]), 2)
+round(cor(ss[,c(23:27, 10)]), 2)
+```
+
+---
+
+# Correlation between DNAmAge and calendar age
+
+```{r, fig.width = 6, fig.height = 9, dpi = 150}
+#DNAmAge
+plot.data <- ss[,c("age", "hannum", "horvath", "zhang", "phenoage", "grimage")]
+colnames(plot.data) <- c("Calendar Age", "Hannum", "Horvath", "Zhang", "PhenoAge", "GrimAge")
+plot.data <- melt(plot.data, id.vars = "Calendar Age", variable.name = "Clock", value.name = "DNAmAge")
+
+library(ggpubr)
+ggplot(data = plot.data, aes(x = `Calendar Age`, y = DNAmAge)) + 
+  geom_point(shape = 1, size = 1) + 
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color= "red") +
+  geom_smooth(method = "lm") +
+  stat_cor(vjust = 0.5) +
+  facet_wrap(facets = vars(Clock), ncol = 2, scales = "free", dir = "v") +
+  scale_x_continuous(limits = c(18, 87), breaks = c(0, 20, 40, 60, 80)) +
+  scale_y_continuous(limits = c(-5, 123), breaks = c(0, 20, 40, 60, 80, 100, 120)) +
+  theme_bw()
+
+#AgeAccel
+plot.data <- ss[,c("age", "hannumRes", "horvathRes", "zhangRes", "phenoageRes", "grimageRes")]
+colnames(plot.data) <- c("Calendar Age", "Hannum", "Horvath", "Zhang", "PhenoAge", "GrimAge")
+plot.data <- melt(plot.data, id.vars = "Calendar Age", variable.name = "Clock", value.name = "AgeAccel")
+
+ggplot(data = plot.data, aes(x = `Calendar Age`, y = AgeAccel)) + 
+  geom_point(shape = 1, size = 1) + 
+  geom_abline(slope = 0, intercept = 0, linetype = "dashed", color= "red") +
+  geom_smooth(method = "lm") +
+  stat_cor(vjust = 0.5) +
+  facet_wrap(facets = vars(Clock), ncol = 2, scales = "free", dir = "v") + 
+  scale_x_continuous(limits = c(18, 87), breaks = c(0, 20, 40, 60, 80)) +
+  scale_y_continuous(limits = c(-38, 68), breaks = c(-20, 0, 20, 40, 60)) +
+  theme_bw()
+```
+
+```{r, fig.width = 3.2, fig.height = 3.2, dpi = 150}
+#DunedinPACE
+plot.data <- ss[,c("age", "dunedinpace")]
+colnames(plot.data) <- c("Calendar Age", "DunedinPACE")
+plot.data <- melt(plot.data, id.vars = "Calendar Age", variable.name = "Clock", value.name = "AgeAccel")
+
+ggplot(data = plot.data, aes(x = `Calendar Age`, y = AgeAccel)) + 
+  geom_point(shape = 1, size = 1) + 
+  geom_abline(slope = 0, intercept = 52, linetype = "dashed", color = "red") +
+  geom_smooth(method = "lm", ) +
+  stat_cor(vjust = 0.5) +
+  facet_wrap(facets = vars(Clock), nrow = 1, scales = "free") + 
+  scale_x_continuous(limits = c(18, 87), breaks = c(0, 20, 40, 60, 80)) +
+  scale_y_continuous(limits = c(26, 86), breaks = c(20, 40, 60, 80)) +
+  theme_bw()
+```
+
+---
+
+# Clock ~ PC models
+
+Run a clock ~ PCs model for each clock's DNAmAge and AgeAccel.
+```{r, fig.width = 4.0, fig.height = 4.0, dpi = 150}
+var.df <- data.frame(
+  row.names = c("age", "ageRes", "hannum", "hannumRes", "horvath", "horvathRes", "zhang", "zhangRes", "phenoage", "phenoageRes", "grimage", "grimageRes", "dunedinpaceAge", "dunedinpace"),
+  variable = c("Age", "AgeAccel", "Hannum", "Hannum residual", "Horvath", "Horvath residual", "Zhang", "Zhang residual", "PhenoAge", "PhenoAge residual", "GrimAge", "GrimAge residual", "DunedinPACE-age", "DunedinPACE"),
+  var.ex = NaN
+)
+
+#Prepare PC labels.
+pc.labs <- c("PC1: Neutrophils", "PC2: T cell naive/memory", "PC3: Treg/CD4Tmem", "PC4: Bmem/Mono", "PC5: Bnv/Eos", "PC6: Naive CD8 T cells", "PC7: Mixed (CD4Tnv/CD8Tnv)", "PC8: Eos/Mono", "PC9: Mixed (CD4Tnv+CD8Tmem)", "PC10: Mixed (Bmem)", "PC11: Mixed (Baso)")
+
+PCEffects <- function(form){
+
+    fit <- lm(formula = form, data = ss.pc)
+    var.ex <- round(summary(fit)$r.squared * 100, 1)
+    print(paste0("Variance explained: ", var.ex, "%"))
+    
+    #Store variance explained.
+    var.df[as.character(form)[2], "var.ex"] <<- var.ex
+    
+    res <- as.data.frame(summary(fit)$coefficients)
+    colnames(res) <- c("estimate", "std.error", "t.stat", "p.val")
+    
+    #Calculate 95% confidence intervals.
+    res$ci.lower <- res$estimate - (1.96 * res$std.error)
+    res$ci.upper <- res$estimate + (1.96 * res$std.error)
+    
+    #Select only cell type effects, removing the intercept.
+    res <- res[(rownames(res) %in% c("PC1", "PC2", "PC3", "PC4", "PC5", "PC6", "PC7", "PC8", "PC9", "PC10", "PC11")),]
+    
+    res$PC <- factor(rownames(res), levels = rownames(res))
+    
+    #Add PC labels.
+    res$PC.label <- pc.labs
+    res$PC.label <- factor(res$PC.label, levels = unique(res$PC.label))
+    
+    print(res)
+    return(res)
+}
+
+res.age <- PCEffects(form = formula(age ~ PC1 + PC2 + PC3 + PC4 + PC5 + PC6 + PC7 + PC8 + PC9 + PC10 + PC11))
+
+#Clocks.
+res.hannum <- PCEffects(form = formula(hannum ~ PC1 + PC2 + PC3 + PC4 + PC5 + PC6 + PC7 + PC8 + PC9 + PC10 + PC11))
+res.horvath <- PCEffects(form = formula(horvath ~ PC1 + PC2 + PC3 + PC4 + PC5 + PC6 + PC7 + PC8 + PC9 + PC10 + PC11))
+res.zhang <- PCEffects(form = formula(zhang ~ PC1 + PC2 + PC3 + PC4 + PC5 + PC6 + PC7 + PC8 + PC9 + PC10 + PC11))
+res.phenoage <- PCEffects(form = formula(phenoage ~ PC1 + PC2 + PC3 + PC4 + PC5 + PC6 + PC7 + PC8 + PC9 + PC10 + PC11))
+res.grimage <- PCEffects(form = formula(grimage ~ PC1 + PC2 + PC3 + PC4 + PC5 + PC6 + PC7 + PC8 + PC9 + PC10 + PC11))
+
+#Clock residuals (and also DunedinPACE).
+res.hannumRes <- PCEffects(form = formula(hannumRes ~ PC1 + PC2 + PC3 + PC4 + PC5 + PC6 + PC7 + PC8 + PC9 + PC10 + PC11))
+res.horvathRes <- PCEffects(form = formula(horvathRes ~ PC1 + PC2 + PC3 + PC4 + PC5 + PC6 + PC7 + PC8 + PC9 + PC10 + PC11))
+res.zhangRes <- PCEffects(form = formula(zhangRes ~ PC1 + PC2 + PC3 + PC4 + PC5 + PC6 + PC7 + PC8 + PC9 + PC10 + PC11))
+res.phenoageRes <- PCEffects(form = formula(phenoageRes ~ PC1 + PC2 + PC3 + PC4 + PC5 + PC6 + PC7 + PC8 + PC9 + PC10 + PC11))
+res.grimageRes <- PCEffects(form = formula(grimageRes ~ PC1 + PC2 + PC3 + PC4 + PC5 + PC6 + PC7 + PC8 + PC9 + PC10 + PC11))
+res.dunedinpace <- PCEffects(form = formula(dunedinpace ~ PC1 + PC2 + PC3 + PC4 + PC5 + PC6 + PC7 + PC8 + PC9 + PC10 + PC11))
+```
+
+---
+
+# Plot PC effect sizes
+
+Plot the effect sizes of the clocks versus the effect sizes of the residuals.
+```{r, fig.width = 5.6, fig.height = 4.3, dpi = 150}
+plotDNAmAgeAndResidual <- function(dnamage, age.residual, clock.lab){
+  
+  dat <- rbind(dnamage, age.residual)
+  dat$type <- factor(c(rep("DNAmAge", 11), rep("AgeAccel", 11)), levels = c("DNAmAge", "AgeAccel"))
+  dat
+  
+  #Prepare annotations for variance explained for the clock and its residual.
+  clock.var <- paste0("Variance explained: ", round(var.df[grep(clock.lab, var.df$variable)[1],"var.ex"], 1), "%")
+  resid.var <- paste0("Variance explained: ", round(var.df[grep(clock.lab, var.df$variable)[2],"var.ex"], 1), "%")
+  
+  p <- ggplot(dat, aes(x = PC.label, y = estimate)) +
+      geom_hline(yintercept = 0, linetype = "dashed") +
+      geom_point(aes(color = type), shape = 19, size = 1.5) +
+      geom_errorbar(aes(ymin = ci.lower, ymax = ci.upper, color = type), width = 0.4) +
+      labs(x = NULL, y = paste0(clock.lab, " effect"), color = "") +
+      theme_bw() +
+      scale_color_manual(values = c("#005580", "#993300"), drop = F) +
+      scale_y_continuous(limits = c(-7.6, 4.7), breaks = seq(-10, 10, 2)) +
+      theme(axis.text.x = element_text(angle = 45, hjust = 1),
+            plot.margin = margin(t = 5.5, r = 5.5, b = 5.5, l = 22, unit = "pt"))
+  print(p)
+  
+}
+
+plotDNAmAgeAndResidual(res.hannum, res.hannumRes, "Hannum")
+plotDNAmAgeAndResidual(res.horvath, res.horvathRes, "Horvath")
+plotDNAmAgeAndResidual(res.zhang, res.zhangRes, "Zhang")
+
+plotDNAmAgeAndResidual(res.phenoage, res.phenoageRes, "PhenoAge")
+plotDNAmAgeAndResidual(res.grimage, res.grimageRes, "GrimAge")
+
+#For DunedinPACE, we only have AgeAccel (the clock itself is a putative age acceleration marker). Add a dummy dataframe for the DNAmAge.
+res.dunedinpace.dummy <- res.dunedinpace
+for(i in 1:7){
+  if(class(res.dunedinpace.dummy[,i]) == "numeric"){
+    res.dunedinpace.dummy[,i] <- NaN
+  } else{
+    res.dunedinpace.dummy[,i] <- NA
+  }
+}
+
+plotDNAmAgeAndResidual(res.dunedinpace.dummy, res.dunedinpace, "DunedinPACE")
+```
+
+Make the plots for all clocks in a single faceted figure.
+```{r, fig.width = 9.6, fig.height = 12, dpi = 150}
+plot.data <- rbind(res.hannum, res.hannumRes, res.horvath, res.horvathRes, res.zhang, res.zhangRes, res.phenoage, res.phenoageRes, res.grimage, res.grimageRes, res.dunedinpace.dummy, res.dunedinpace)
+plot.data$type <- factor(rep(c(rep("DNAmAge", 11), rep("AgeAccel", 11)), 6), levels = c("DNAmAge", "AgeAccel"))
+plot.data$clock <- factor(c(rep("Hannum", 22), rep("Horvath", 22), rep("Zhang", 22), rep("PhenoAge", 22), rep("GrimAge", 22), rep("DunedinPACE", 22)), levels = c("Horvath", "Hannum", "Zhang", "PhenoAge", "GrimAge", "DunedinPACE"))
+head(plot.data)
+
+ggplot(plot.data, aes(x = PC.label, y = estimate)) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_point(aes(color = type), shape = 19, size = 1.5) +
+  geom_errorbar(aes(ymin = ci.lower, ymax = ci.upper, color = type), width = 0.4) +
+  theme_bw() +
+  scale_color_manual(values = c("#005580", "#993300"), drop = F) +
+  scale_y_continuous(limits = c(-7.6, 4.7), breaks = seq(-10, 10, 2)) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        plot.margin = margin(t = 5.5, r = 5.5, b = 5.5, l = 22, unit = "pt")) +
+  facet_wrap(facets = vars(clock), scales = "free", nrow = 2, dir = "h") +
+  theme(panel.spacing.x = unit(1.2, "cm")) +
+  labs(color= "", x = "", y = "")
+```
+
+---
+
+# Variance explained
+
+Plot variance explained for each clock and residual.
+```{r, fig.width = 7, fig.height = 3, dpi = 150}
+plot.data <- var.df
+plot.data$variable <- factor(plot.data$variable, levels = unique(plot.data$variable))
+
+plot.data$group = factor(c("Age", "Age", "Hannum", "Hannum", "Horvath", "Horvath", "Zhang", "Zhang", "PhenoAge", "PhenoAge", "GrimAge", "GrimAge", "DunedinPACE", "DunedinPACE"), levels = c(c("Age", "Hannum", "Horvath", "Zhang", "PhenoAge", "GrimAge", "DunedinPACE")))
+plot.data$type = factor(c("Age", "AgeAccel", "DNAmAge", "AgeAccel", "DNAmAge", "AgeAccel", "DNAmAge", "AgeAccel", "DNAmAge", "AgeAccel", "DNAmAge", "AgeAccel", "DNAmAge", "AgeAccel"), levels = c("Age", "DNAmAge", "AgeAccel"))
+plot.data$var.round <- paste0(round(plot.data$var.ex, 0), "%")
+
+#Split the data into 1st-gen and 2nd-gen clocks.
+plot.data$gen <- c(rep("Age", 2), rep("1st-Generation Clocks", 6), rep("2nd-Generation Clocks", 6))
+plot.data$gen <- factor(plot.data$gen, levels = c("Age", "1st-Generation Clocks", "2nd-Generation Clocks"))
+
+#Remove unused rows.
+plot.data$var.ex[c(2, 13)] <- 0
+plot.data$var.round[c(2, 13)] <- ""
+plot.data
+
+# Other visualization order.
+plot.data <- plot.data[-c(2, 13),]
+
+ggplot(data = plot.data, aes(x = group, y = var.ex, fill = type, label = var.round)) + 
+  geom_bar(stat = "identity", width = 0.8, position = position_dodge(width = 0.8)) + 
+  geom_text(hjust = 0.5, vjust = 1.15, position = position_dodge(width = 0.8), mapping = aes(color = type), size = 3) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), axis.ticks.x = element_blank(), panel.grid.major.x = element_blank()) +
+  scale_fill_manual(values = c("#222222", "#005580", "#993300")) +
+  scale_color_manual(values = c("white", "white", "white")) +
+  scale_y_continuous(breaks = seq(0, 60, 10), limits = c(0, 53)) +
+  labs(x = "", y = "Variance explained (%)", fill = "") +
+  guides(color = "none", fill = "none") +
+  facet_grid(cols = vars(type), scales = "free", space = "free")
+```
+
+Plot variance explained per PC.
+```{r, fig.width = 9.29, fig.height = 4, dpi = 150}
+PrintTopPCs <- function(){
+  
+  data.frame(
+    row.names = paste0("PC", 1:11),
+    var = rbind(
+      round(summary(lm(formula = var ~ PC1, data = ss.pc))$r.squared * 100, 3),
+      round(summary(lm(formula = var ~ PC2, data = ss.pc))$r.squared * 100, 3),
+      round(summary(lm(formula = var ~ PC3, data = ss.pc))$r.squared * 100, 3),
+      round(summary(lm(formula = var ~ PC3, data = ss.pc))$r.squared * 100, 3),
+      round(summary(lm(formula = var ~ PC5, data = ss.pc))$r.squared * 100, 3),
+      round(summary(lm(formula = var ~ PC6, data = ss.pc))$r.squared * 100, 3),
+      round(summary(lm(formula = var ~ PC7, data = ss.pc))$r.squared * 100, 3),
+      round(summary(lm(formula = var ~ PC8, data = ss.pc))$r.squared * 100, 3),
+      round(summary(lm(formula = var ~ PC9, data = ss.pc))$r.squared * 100, 3),
+      round(summary(lm(formula = var ~ PC10, data = ss.pc))$r.squared * 100, 3),
+      round(summary(lm(formula = var ~ PC11, data = ss.pc))$r.squared * 100, 3)
+      )
+  )
+  
+}
+
+top.pcs <- data.frame(
+  row.names = paste0("PC", 1:11),
+  PC = pc.labs,
+  age = rep(NA, 11),
+  hannum = rep(NA, 11),
+  horvath = rep(NA, 11),
+  zhang = rep(NA, 11),
+  phenoage = rep(NA, 11),
+  grimage = rep(NA, 11),
+  dunedinpaceDummy = rep(NA, 11),
+  ageRes = rep(NA, 11),
+  hannumRes = rep(NA, 11),
+  horvathRes = rep(NA, 11),
+  zhangRes = rep(NA, 11),
+  phenoageRes = rep(NA, 11),
+  grimageRes = rep(NA, 11),
+  dunedinpace = rep(NA, 11)
+)
+
+top.pcs$PC <- factor(top.pcs$PC, levels = (unique(top.pcs$PC)))
+
+#Calendar age
+ss.pc$var <- ss.pc$age
+top.pcs$age <- PrintTopPCs()$var
+
+#DNAmAge
+ss.pc$var <- ss.pc$hannum
+top.pcs$hannum <- PrintTopPCs()$var
+
+ss.pc$var <- ss.pc$horvath
+top.pcs$horvath <- PrintTopPCs()$var
+
+ss.pc$var <- ss.pc$zhang
+top.pcs$zhang <- PrintTopPCs()$var
+
+ss.pc$var <- ss.pc$phenoage
+top.pcs$phenoage <- PrintTopPCs()$var
+
+ss.pc$var <- ss.pc$grimage
+top.pcs$grimage <- PrintTopPCs()$var
+
+
+
+#AgeAccels
+ss.pc$var <- ss.pc$hannumRes
+top.pcs$hannumRes <- PrintTopPCs()$var
+
+ss.pc$var <- ss.pc$horvathRes
+top.pcs$horvathRes <- PrintTopPCs()$var
+
+ss.pc$var <- ss.pc$zhangRes
+top.pcs$zhangRes <- PrintTopPCs()$var
+
+ss.pc$var <- ss.pc$phenoageRes
+top.pcs$phenoageRes <- PrintTopPCs()$var
+
+ss.pc$var <- ss.pc$grimageRes
+top.pcs$grimageRes <- PrintTopPCs()$var
+
+ss.pc$var <- ss.pc$dunedinpace
+top.pcs$dunedinpace <- PrintTopPCs()$var
+
+#Remove unused columns.
+top.pcs <- top.pcs[,-c(8, 9)]
+top.pcs
+
+library(reshape2)
+library(ggplot2)
+plot.data <- melt(top.pcs, id.vars = "PC")
+plot.data$group <- factor(NA, levels = c("Age", "DNAmAge",  "AgeAccel"))
+plot.data$group[plot.data$variable %in% c("age", "ageRes")] <- "Age"
+plot.data$group[plot.data$variable %in% c("hannum", "horvath", "zhang", "phenoage", "grimage", "dunedinpaceDummy")] <- "DNAmAge"
+plot.data$group[plot.data$variable %in% c("hannumRes", "horvathRes", "zhangRes", "phenoageRes", "grimageRes", "dunedinpace")] <- "AgeAccel"
+
+#Make a new variable that is the same for DNAmAge and AgeAccel of the same clock for better plotting.
+plot.data$clock <- as.character(plot.data$variable)
+plot.data$clock[grep("Res", plot.data$clock)] <- do.call("rbind", strsplit(plot.data$clock[grep("Res", plot.data$clock)], split = "Res"))
+plot.data$clock[grep("Dummy", plot.data$clock)] <- do.call("rbind", strsplit(plot.data$clock[grep("Dummy", plot.data$clock)], split = "Dummy"))
+plot.data$clock <- factor(plot.data$clock, levels = unique(plot.data$clock))
+levels(plot.data$clock) <- c("Age", "Hannum", "Horvath", "Zhang", "PhenoAge", "GrimAge", "DunedinPACE")
+head(plot.data)
+
+ggplot(plot.data, aes(x = clock, y = PC, fill = value)) + 
+  geom_tile() + 
+  facet_grid(cols = vars(group), scales = "free", space = "free") +
+  geom_text(aes(label = format(round(value, 1), 1)), vjust = 0.5, hjust = 0.5, size = 3.2) +
+  scale_fill_gradient(low = "white", high = "red", limit = c(0, max(plot.data$value)),
+                      guide = guide_colorbar(label.position = "left", label.hjust = 1)) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        axis.title = element_blank(),
+        panel.grid = element_blank(),
+        strip.text = element_blank(),
+        legend.title = element_text(hjust = 1),
+        legend.position = "left") +
+  scale_y_discrete(position = "right") +
+  labs(x = "Clock variable", y = "Cell count PC", fill = "Variance\nexplained\n(%)")
+```
+
+---
+
+# SessionInfo
+```{r}
+sessionInfo()
+```
